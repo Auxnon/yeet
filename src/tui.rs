@@ -10,11 +10,13 @@ use ratatui::style::Style;
 use ratatui::widgets::{StatefulWidget, Widget};
 use ratatui::{DefaultTerminal, Frame};
 use ratatui_cheese::field::ValidationResult;
+use ratatui_cheese::fieldset::{Fieldset, FieldsetFill};
 use ratatui_cheese::help::{Binding, Help};
 use ratatui_cheese::input::{Input, InputState};
 use ratatui_cheese::list::{DefaultHeader, List, ListItem, ListItemContext, ListState};
 use ratatui_cheese::theme::Palette;
 
+use crate::dest::{Destination, current_user};
 use crate::warehouse::{self, Item, Kind};
 
 struct Row {
@@ -237,7 +239,7 @@ fn chrome(frame: &mut Frame, palette: &Palette, subtitle: &str, help: &Help) -> 
 // ---------------------------------------------------------------------------
 
 enum DestRow {
-    Saved(String),
+    Saved(Destination),
     AddNew,
 }
 
@@ -248,67 +250,125 @@ impl ListItem for DestRow {
 
     fn render(&self, area: Rect, buf: &mut Buffer, ctx: &ListItemContext) {
         let p = &ctx.palette;
-        let (text, fg) = match self {
-            DestRow::Saved(host) => (
-                format!("→ {host}"),
-                if ctx.selected {
-                    p.primary
-                } else {
-                    p.foreground
-                },
-            ),
-            DestRow::AddNew => (
-                "+ new destination".to_string(),
-                if ctx.selected { p.primary } else { p.muted },
-            ),
+        let fg = |dim| match (ctx.selected, dim) {
+            (true, _) => p.primary,
+            (false, false) => p.foreground,
+            (false, true) => p.muted,
         };
-        buf.set_string(
-            area.x,
-            area.y,
-            truncate(&text, area.width as usize),
-            Style::default().fg(fg),
-        );
+        let width = area.width as usize;
+        match self {
+            DestRow::Saved(d) => {
+                let main = format!("→ {}", d.name.as_deref().unwrap_or(&d.host));
+                buf.set_string(
+                    area.x,
+                    area.y,
+                    truncate(&main, width),
+                    Style::default().fg(fg(false)),
+                );
+                // With a nickname, show the real target beside it; otherwise just the user.
+                let detail = match (&d.name, &d.user) {
+                    (Some(_), _) => d.target(),
+                    (None, Some(u)) => format!("as {u}"),
+                    (None, None) => String::new(),
+                };
+                let x = main.chars().count() + 2;
+                if !detail.is_empty() && x < width {
+                    buf.set_string(
+                        area.x + x as u16,
+                        area.y,
+                        truncate(&detail, width - x),
+                        Style::default().fg(p.faint),
+                    );
+                }
+            }
+            DestRow::AddNew => {
+                buf.set_string(
+                    area.x,
+                    area.y,
+                    "+ new destination",
+                    Style::default().fg(fg(true)),
+                );
+            }
+        }
     }
 }
 
 pub struct DestPick {
     /// `None` if the user cancelled.
-    pub chosen: Option<String>,
-    /// Saved destinations after any removals made in the picker.
-    pub destinations: Vec<String>,
+    pub chosen: Option<Destination>,
+    /// Saved destinations after any edits or removals made in the picker.
+    pub destinations: Vec<Destination>,
 }
 
-#[derive(PartialEq)]
-enum Mode {
-    List,
-    Input,
+const HOST: usize = 0;
+const USER: usize = 1;
+const NICK: usize = 2;
+
+struct Editor {
+    fields: [InputState; 3],
+    focus: usize,
+    /// Row being edited, or `None` when adding a new destination.
+    editing: Option<usize>,
 }
 
-struct DestApp<'a> {
-    rows: Vec<DestRow>,
-    list: ListState,
-    input: InputState,
-    mode: Mode,
-    sending: &'a str,
-    prefill: &'a str,
-    network: Option<&'a str>,
-}
-
-impl DestApp<'_> {
-    fn open_input(&mut self) {
-        self.input = InputState::new().validator(validate_dest);
-        self.input.set_value(self.prefill.to_string());
-        self.input.end();
-        self.input.set_focused(true);
-        self.mode = Mode::Input;
+impl Editor {
+    fn new(dest: Option<&Destination>, prefill: &str, editing: Option<usize>) -> Self {
+        let mut fields = [
+            InputState::new().validator(validate_host),
+            InputState::new().validator(validate_user),
+            InputState::new(),
+        ];
+        let values = match dest {
+            Some(d) => [
+                d.host.clone(),
+                d.user.clone().unwrap_or_default(),
+                d.name.clone().unwrap_or_default(),
+            ],
+            None => [prefill.to_string(), String::new(), String::new()],
+        };
+        for (f, v) in fields.iter_mut().zip(values) {
+            f.set_value(v);
+            f.end();
+        }
+        let mut editor = Editor {
+            fields,
+            focus: HOST,
+            editing,
+        };
+        editor.focus_field(HOST);
+        editor
     }
 
-    fn has_saved(&self) -> bool {
-        self.rows.len() > 1
+    fn focus_field(&mut self, i: usize) {
+        self.focus = i;
+        for (j, f) in self.fields.iter_mut().enumerate() {
+            f.set_focused(j == i);
+        }
+    }
+
+    fn current(&mut self) -> &mut InputState {
+        &mut self.fields[self.focus]
+    }
+
+    /// Validate every field; on failure focus the first bad one.
+    fn finish(&mut self) -> Option<Destination> {
+        if let Some(bad) = (0..3).find(|&i| !self.fields[i].validate()) {
+            self.focus_field(bad);
+            return None;
+        }
+        let value = |i: usize| {
+            let v = self.fields[i].value().trim();
+            (!v.is_empty()).then(|| v.to_string())
+        };
+        // `user@host` typed into the host field fills in the user.
+        let mut dest = Destination::parse(&value(HOST)?);
+        dest.user = value(USER).or(dest.user);
+        dest.name = value(NICK);
+        Some(dest)
     }
 }
 
-fn validate_dest(v: &str) -> ValidationResult {
+fn validate_host(v: &str) -> ValidationResult {
     let v = v.trim();
     if v.is_empty() {
         Err("enter a host".into())
@@ -321,10 +381,44 @@ fn validate_dest(v: &str) -> ValidationResult {
     }
 }
 
+fn validate_user(v: &str) -> ValidationResult {
+    let v = v.trim();
+    if v.chars().any(|c| c.is_whitespace() || c == '@') {
+        Err("no spaces or @ in user".into())
+    } else {
+        Ok(None)
+    }
+}
+
+struct DestApp<'a> {
+    rows: Vec<DestRow>,
+    list: ListState,
+    editor: Option<Editor>,
+    sending: &'a str,
+    prefill: &'a str,
+    network: Option<&'a str>,
+}
+
+impl DestApp<'_> {
+    fn has_saved(&self) -> bool {
+        self.rows.len() > 1
+    }
+
+    fn open_new(&mut self) {
+        self.editor = Some(Editor::new(None, self.prefill, None));
+    }
+
+    fn open_edit(&mut self, i: usize) {
+        if let DestRow::Saved(d) = &self.rows[i] {
+            self.editor = Some(Editor::new(Some(d), self.prefill, Some(i)));
+        }
+    }
+}
+
 /// Pick where to send. The last row adds a new destination; with nothing
-/// saved, the input opens straight away, prefilled with `prefill`.
+/// saved, the editor opens straight away with the host prefilled.
 pub fn pick_destination(
-    saved: Vec<String>,
+    saved: Vec<Destination>,
     sending: &str,
     prefill: &str,
     network: Option<&str>,
@@ -334,14 +428,13 @@ pub fn pick_destination(
     let mut app = DestApp {
         list: ListState::new(rows.len()),
         rows,
-        input: InputState::new(),
-        mode: Mode::List,
+        editor: None,
         sending,
         prefill,
         network,
     };
     if !app.has_saved() {
-        app.open_input();
+        app.open_new();
     }
 
     let mut terminal = ratatui::init();
@@ -353,7 +446,7 @@ pub fn pick_destination(
         .rows
         .into_iter()
         .filter_map(|r| match r {
-            DestRow::Saved(h) => Some(h),
+            DestRow::Saved(d) => Some(d),
             DestRow::AddNew => None,
         })
         .collect();
@@ -363,7 +456,7 @@ pub fn pick_destination(
     })
 }
 
-fn dest_loop(terminal: &mut DefaultTerminal, app: &mut DestApp) -> Result<Option<String>> {
+fn dest_loop(terminal: &mut DefaultTerminal, app: &mut DestApp) -> Result<Option<Destination>> {
     loop {
         terminal.draw(|f| draw_dest(f, app))?;
         if !event::poll(Duration::from_millis(250))? {
@@ -378,40 +471,66 @@ fn dest_loop(terminal: &mut DefaultTerminal, app: &mut DestApp) -> Result<Option
         if key.code == KeyCode::Char('c') && key.modifiers.contains(KeyModifiers::CONTROL) {
             return Ok(None);
         }
-        let n = app.rows.len();
 
-        if app.mode == Mode::Input {
+        let has_saved = app.has_saved();
+        if let Some(editor) = &mut app.editor {
             match key.code {
-                KeyCode::Esc if app.has_saved() => app.mode = Mode::List,
+                KeyCode::Esc if has_saved => app.editor = None,
                 KeyCode::Esc => return Ok(None),
-                KeyCode::Enter => {
-                    if app.input.validate() {
-                        return Ok(Some(app.input.value().trim().to_string()));
+                KeyCode::Tab | KeyCode::Down => editor.focus_field((editor.focus + 1) % 3),
+                KeyCode::BackTab | KeyCode::Up => editor.focus_field((editor.focus + 2) % 3),
+                KeyCode::Enter if editor.focus < NICK => {
+                    if editor.current().validate() {
+                        editor.focus_field(editor.focus + 1);
                     }
                 }
-                KeyCode::Char(c) => app.input.insert_char(c),
-                KeyCode::Backspace => app.input.delete_before(),
-                KeyCode::Delete => app.input.delete_at(),
-                KeyCode::Left => app.input.move_left(),
-                KeyCode::Right => app.input.move_right(),
-                KeyCode::Home => app.input.home(),
-                KeyCode::End => app.input.end(),
+                KeyCode::Enter => {
+                    let Some(dest) = editor.finish() else {
+                        continue;
+                    };
+                    match editor.editing {
+                        // Editing saves in place and returns to the list.
+                        Some(i) => {
+                            app.rows[i] = DestRow::Saved(dest);
+                            app.editor = None;
+                        }
+                        None => return Ok(Some(dest)),
+                    }
+                }
+                KeyCode::Char('u') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                    editor.current().set_value(String::new());
+                }
+                KeyCode::Char(c)
+                    if !key
+                        .modifiers
+                        .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT) =>
+                {
+                    editor.current().insert_char(c);
+                }
+                KeyCode::Backspace => editor.current().delete_before(),
+                KeyCode::Delete => editor.current().delete_at(),
+                KeyCode::Left => editor.current().move_left(),
+                KeyCode::Right => editor.current().move_right(),
+                KeyCode::Home => editor.current().home(),
+                KeyCode::End => editor.current().end(),
                 _ => {}
             }
             continue;
         }
 
+        let n = app.rows.len();
+        let i = app.list.selected();
         match key.code {
             KeyCode::Esc | KeyCode::Char('q') => return Ok(None),
             KeyCode::Char('j') | KeyCode::Down => app.list.select_next(n, true),
             KeyCode::Char('k') | KeyCode::Up => app.list.select_prev(n, true),
-            KeyCode::Char('n') | KeyCode::Char('+') => app.open_input(),
-            KeyCode::Enter => match &app.rows[app.list.selected()] {
-                DestRow::Saved(host) => return Ok(Some(host.clone())),
-                DestRow::AddNew => app.open_input(),
+            KeyCode::Char('n') | KeyCode::Char('+') => app.open_new(),
+            KeyCode::Char('e') => app.open_edit(i),
+            KeyCode::Enter => match &app.rows[i] {
+                DestRow::Saved(d) => return Ok(Some(d.clone())),
+                DestRow::AddNew => app.open_new(),
             },
             KeyCode::Char('x') | KeyCode::Delete => {
-                let i = app.list.selected();
                 if matches!(app.rows[i], DestRow::Saved(_)) {
                     app.rows.remove(i);
                     let n = app.rows.len();
@@ -426,51 +545,101 @@ fn dest_loop(terminal: &mut DefaultTerminal, app: &mut DestApp) -> Result<Option
 
 fn draw_dest(frame: &mut Frame, app: &mut DestApp) {
     let palette = Palette::charm();
-    let bindings = match app.mode {
-        Mode::List => vec![
+    let bindings = match &app.editor {
+        None => vec![
             Binding::new("↑/↓", "move"),
             Binding::new("enter", "send"),
             Binding::new("n", "new"),
+            Binding::new("e", "edit"),
             Binding::new("x", "forget"),
             Binding::new("esc/q", "cancel"),
         ],
-        Mode::Input => vec![
-            Binding::new("enter", "send"),
-            Binding::new("esc", if app.has_saved() { "back" } else { "cancel" }),
-        ],
+        Some(ed) => {
+            let enter = match (ed.focus, ed.editing) {
+                (NICK, Some(_)) => "save",
+                (NICK, None) => "send",
+                _ => "next",
+            };
+            vec![
+                Binding::new("tab/↑↓", "field"),
+                Binding::new("ctrl+u", "clear"),
+                Binding::new("enter", enter),
+                Binding::new("esc", if app.has_saved() { "back" } else { "cancel" }),
+            ]
+        }
     };
     let help = help_bar(&palette, bindings);
     let body = chrome(frame, &palette, &format!("sending {}", app.sending), &help);
 
-    match app.mode {
-        Mode::List => {
-            let header = DefaultHeader::new("Send to");
-            let list = List::new(&app.rows)
-                .header(&header)
-                .item_spacing(0)
-                .palette(palette.clone());
-            StatefulWidget::render(&list, body, frame.buffer_mut(), &mut app.list);
-        }
-        Mode::Input => {
-            let [input_area, _, hint_area] = Layout::vertical([
-                Constraint::Length(5),
-                Constraint::Length(1),
-                Constraint::Length(1),
-            ])
-            .areas(body);
-            let input = Input::new("New destination")
-                .description("ssh host: user@host, an ~/.ssh/config alias, or an IP")
-                .placeholder("192.168.1.20")
-                .palette(&palette);
-            StatefulWidget::render(&input, input_area, frame.buffer_mut(), &mut app.input);
-            if let Some(net) = app.network {
-                frame.buffer_mut().set_string(
-                    hint_area.x,
-                    hint_area.y,
-                    truncate(&format!("this machine: {net}"), hint_area.width as usize),
-                    Style::default().fg(palette.faint),
-                );
-            }
-        }
+    let Some(editor) = &mut app.editor else {
+        let header = DefaultHeader::new("Send to");
+        let list = List::new(&app.rows)
+            .header(&header)
+            .item_spacing(0)
+            .palette(palette.clone());
+        StatefulWidget::render(&list, body, frame.buffer_mut(), &mut app.list);
+        return;
+    };
+
+    let title = if editor.editing.is_some() {
+        "Edit destination"
+    } else {
+        "New destination"
+    };
+    let fieldset = Fieldset::new()
+        .title(title)
+        .fill(FieldsetFill::Dash)
+        .palette(&palette);
+    let fs_area = Rect {
+        height: body.height.min(16),
+        ..body
+    };
+    let inner = fieldset.inner(fs_area);
+    Widget::render(&fieldset, fs_area, frame.buffer_mut());
+
+    let [_, host_area, user_area, nick_area, hint_area] = Layout::vertical([
+        Constraint::Length(1),
+        Constraint::Length(4),
+        Constraint::Length(4),
+        Constraint::Length(4),
+        Constraint::Length(1),
+    ])
+    .areas(inner);
+
+    let user_desc = match current_user() {
+        Some(u) => format!("optional; blank uses your ssh default ({u})"),
+        None => "optional; blank uses your ssh default".to_string(),
+    };
+    let inputs = [
+        (
+            Input::new("Host")
+                .description("IP, hostname, or ~/.ssh/config alias")
+                .placeholder("192.168.1.20"),
+            host_area,
+        ),
+        (
+            Input::new("User")
+                .description(&user_desc)
+                .placeholder("(default)"),
+            user_area,
+        ),
+        (
+            Input::new("Nickname")
+                .description("optional; shown in the list")
+                .placeholder("e.g. desktop"),
+            nick_area,
+        ),
+    ];
+    for ((input, area), state) in inputs.into_iter().zip(editor.fields.iter_mut()) {
+        StatefulWidget::render(&input.palette(&palette), area, frame.buffer_mut(), state);
+    }
+
+    if let Some(net) = app.network {
+        frame.buffer_mut().set_string(
+            hint_area.x,
+            hint_area.y,
+            truncate(&format!("this machine: {net}"), hint_area.width as usize),
+            Style::default().fg(palette.faint),
+        );
     }
 }

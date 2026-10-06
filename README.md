@@ -27,18 +27,27 @@ yeet -p -k > x       # same, but leave it in the warehouse
 ## Destinations
 
 Sending opens a picker of your saved destinations. The last row is
-**+ new destination**. The first time, when nothing is saved yet, the
-new-destination input opens straight away, already filled in with your LAN
-prefix. On a `192.168.1.0/24` network you'll see `192.168.1.` and only need
-to type the last number. yeet finds the prefix from the interface on your
-default route and its netmask, and ignores Docker/VM bridges and VPN
-tunnels.
+**+ new destination**. The first time, when nothing is saved yet, the editor
+opens straight away with three fields:
 
-A destination is anything `ssh` accepts: `192.168.1.20`, `me@192.168.1.20`,
-or a `~/.ssh/config` alias. It's saved only after a send to it succeeds, so
-typos don't pile up, and the most recently used destination comes first. Press
-`x` in the picker to forget one. Use `--to HOST` (or `YEET_TO`) to skip the
-picker, e.g. in scripts.
+- **Host:** already filled in with your LAN prefix. On a `192.168.1.0/24`
+  network you'll see `192.168.1.` and only need to type the last number.
+  yeet finds the prefix from the interface on your default route and its
+  netmask, and ignores Docker/VM bridges and VPN tunnels. An IP, a hostname,
+  or a `~/.ssh/config` alias all work.
+- **User:** optional. Leave it blank and ssh uses its default (your current
+  user, or `User` from `~/.ssh/config`). Typing `me@host` into Host fills
+  this in for you.
+- **Nickname:** optional. Shown in the picker instead of the address.
+
+`tab`/`↑↓` move between fields, `enter` goes to the next field and sends from
+the last one, and `ctrl+u` clears a field. A new destination is saved only
+after a send to it succeeds, so typos don't pile up. The most recently used
+destination comes first.
+
+In the picker, `e` edits a destination in place, `x` forgets it and `n` adds a
+new one. Use `--to [user@]host` (or `YEET_TO`) to skip the picker, e.g. in
+scripts.
 
 ## How it works
 
@@ -77,7 +86,12 @@ highlighted item if nothing is marked) · `esc`/`q` cancel without taking anythi
 saves destinations, so comments in it are not kept):
 
 ```toml
-destinations = ["desktop", "192.168.1.20"]  # managed by the picker
+# destinations are managed by the picker
+[[destinations]]
+host = "192.168.1.20"
+user = "me"        # optional
+name = "desktop"   # optional
+
 via = "auto"                    # auto | rsync | scp
 remote_dir = ".yeet/warehouse"  # relative to the remote home
 ```

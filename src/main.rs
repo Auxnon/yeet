@@ -1,4 +1,5 @@
 mod clipboard;
+mod dest;
 mod net;
 mod send;
 mod tui;
@@ -12,6 +13,7 @@ use std::process::ExitCode;
 use anyhow::{Context, Result, bail};
 use clap::Parser;
 
+use dest::Destination;
 use send::{Config, Via};
 use warehouse::{Item, Kind};
 
@@ -114,7 +116,7 @@ fn send(cli: Cli) -> Result<()> {
 
     let mut config = Config::load()?;
     let to = match cli.to {
-        Some(to) => to,
+        Some(to) => Destination::parse(&to),
         None => {
             if !io::stdout().is_terminal() {
                 bail!(
@@ -145,7 +147,7 @@ fn send(cli: Cli) -> Result<()> {
     send::run(send::SendOpts {
         paths: cli.paths,
         text,
-        to: to.clone(),
+        to: to.target(),
         via: cli.via.or(config.via).unwrap_or(Via::Auto),
         remote_dir: cli
             .remote_dir
@@ -154,7 +156,7 @@ fn send(cli: Cli) -> Result<()> {
     })?;
 
     // Only remember destinations that actually worked, so typos don't pile up.
-    if to != "local" {
+    if to.host != "local" {
         config.remember(&to);
         config.save()?;
     }

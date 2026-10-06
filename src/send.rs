@@ -9,6 +9,7 @@ use anyhow::{Context, Result, bail};
 use clap::ValueEnum;
 use serde::{Deserialize, Serialize};
 
+use crate::dest::Destination;
 use crate::warehouse::{self, Kind, Meta};
 
 pub const DEFAULT_REMOTE_DIR: &str = ".yeet/warehouse";
@@ -28,7 +29,7 @@ pub enum Via {
 pub struct Config {
     /// Saved destinations, most recently used first.
     #[serde(skip_serializing_if = "Vec::is_empty")]
-    pub destinations: Vec<String>,
+    pub destinations: Vec<Destination>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub via: Option<Via>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -59,10 +60,15 @@ impl Config {
             .with_context(|| format!("writing {}", path.display()))
     }
 
-    /// Move `dest` to the front of the saved destinations.
-    pub fn remember(&mut self, dest: &str) {
-        self.destinations.retain(|d| d != dest);
-        self.destinations.insert(0, dest.to_string());
+    /// Move `dest` to the front of the saved destinations. An existing entry
+    /// for the same user@host keeps its nickname unless `dest` brings one.
+    pub fn remember(&mut self, dest: &Destination) {
+        let mut entry = dest.clone();
+        if let Some(i) = self.destinations.iter().position(|d| d.same_target(dest)) {
+            let old = self.destinations.remove(i);
+            entry.name = entry.name.or(old.name);
+        }
+        self.destinations.insert(0, entry);
     }
 }
 
