@@ -9,54 +9,55 @@ use std::path::PathBuf;
 use std::process::ExitCode;
 
 use anyhow::{Context, Result, bail};
-use clap::{Parser, Subcommand};
+use clap::Parser;
 
 use send::{Config, Via};
 use warehouse::{Item, Kind};
 
 /// Yeet files and text to other machines on your LAN.
 ///
-/// Run with no arguments to pick pending items: files move into the current
-/// directory, text goes to the clipboard. When stdout is piped, the most recent
-/// item is written to stdout instead (`yeet | jq .`).
+///   yeet FILE...        send files/folders
+///   yeet -t "text"      send raw text (`-t` alone reads stdin)
+///   yeet                pick pending items: files move into the current
+///                       directory, text goes to the clipboard
+///   yeet | cmd          write the most recent item to stdout
 #[derive(Parser)]
-#[command(version, about, long_about)]
+#[command(version, about, long_about, verbatim_doc_comment)]
 struct Cli {
-    #[command(subcommand)]
-    cmd: Option<Cmd>,
-}
+    /// Files or folders to send
+    paths: Vec<PathBuf>,
 
-#[derive(Subcommand)]
-enum Cmd {
-    /// Send files, folders, or text to another machine's warehouse
-    #[command(visible_alias = "s")]
-    Send {
-        /// Files or folders to send
-        paths: Vec<PathBuf>,
-        /// Send this text (stdin is used when no paths or text are given)
-        #[arg(short, long)]
-        text: Option<String>,
-        /// Destination: an ssh host (user@host or ~/.ssh/config alias), or `local`
-        #[arg(long, env = "YEET_TO")]
-        to: Option<String>,
-        /// Transfer tool
-        #[arg(long, value_enum)]
-        via: Option<Via>,
-        /// Warehouse path on the remote, relative to its home directory
-        #[arg(long)]
-        remote_dir: Option<String>,
-    },
+    /// Send raw text; with no value, read it from stdin
+    #[arg(short, long, num_args = 0..=1, default_missing_value = "-")]
+    text: Option<String>,
+
+    /// Destination: an ssh host (user@host or ~/.ssh/config alias), or `local`
+    #[arg(long, env = "YEET_TO")]
+    to: Option<String>,
+
+    /// Transfer tool
+    #[arg(long, value_enum)]
+    via: Option<Via>,
+
+    /// Warehouse path on the remote, relative to its home directory
+    #[arg(long)]
+    remote_dir: Option<String>,
+
     /// Write the most recent item to stdout and remove it from the warehouse
-    Pop {
-        /// Leave the item in the warehouse
-        #[arg(short, long)]
-        keep: bool,
-    },
+    #[arg(short, long, conflicts_with_all = ["paths", "text", "list", "clear"])]
+    pop: bool,
+
+    /// With --pop (or when piped): leave the item in the warehouse
+    #[arg(short, long, conflicts_with_all = ["paths", "text"])]
+    keep: bool,
+
     /// List pending items without the TUI
-    #[command(visible_alias = "ls")]
-    List,
+    #[arg(short, long, conflicts_with_all = ["paths", "text", "clear"])]
+    list: bool,
+
     /// Delete every pending item
-    Clear,
+    #[arg(long, conflicts_with_all = ["paths", "text"])]
+    clear: bool,
 }
 
 fn main() -> ExitCode {
@@ -71,52 +72,46 @@ fn main() -> ExitCode {
 
 fn run() -> Result<ExitCode> {
     let cli = Cli::parse();
-    match cli.cmd {
-        Some(Cmd::Send {
-            paths,
-            text,
+    if !cli.paths.is_empty() || cli.text.is_some() {
+        let config = Config::load()?;
+        let to = cli.to.or(config.to).context(
+            "no destination: pass --to <host>, set YEET_TO, or set `to` in ~/.config/yeet/config.toml",
+        )?;
+        send::run(send::SendOpts {
+            paths: cli.paths,
+            text: cli.text,
             to,
-            via,
-            remote_dir,
-        }) => {
-            let config = Config::load()?;
-            let to = to.or(config.to).context(
-                "no destination: pass --to <host>, set YEET_TO, or set `to` in ~/.config/yeet/config.toml",
-            )?;
-            send::run(send::SendOpts {
-                paths,
-                text,
-                to,
-                via: via.or(config.via).unwrap_or(Via::Auto),
-                remote_dir: remote_dir
-                    .or(config.remote_dir)
-                    .unwrap_or_else(|| send::DEFAULT_REMOTE_DIR.into()),
-            })?;
-            Ok(ExitCode::SUCCESS)
+            via: cli.via.or(config.via).unwrap_or(Via::Auto),
+            remote_dir: cli
+                .remote_dir
+                .or(config.remote_dir)
+                .unwrap_or_else(|| send::DEFAULT_REMOTE_DIR.into()),
+        })?;
+        return Ok(ExitCode::SUCCESS);
+    }
+
+    if cli.list {
+        for item in warehouse::list()? {
+            println!(
+                "{}\t{}\t{}\t{}",
+                item.id,
+                warehouse::human_age(item.meta.sent_at),
+                item.meta.from,
+                warehouse::describe(&item)
+            );
         }
-        Some(Cmd::Pop { keep }) => pop(keep),
-        Some(Cmd::List) => {
-            for item in warehouse::list()? {
-                println!(
-                    "{}\t{}\t{}\t{}",
-                    item.id,
-                    warehouse::human_age(item.meta.sent_at),
-                    item.meta.from,
-                    warehouse::describe(&item)
-                );
-            }
-            Ok(ExitCode::SUCCESS)
+        Ok(ExitCode::SUCCESS)
+    } else if cli.clear {
+        let items = warehouse::list()?;
+        for item in &items {
+            item.remove()?;
         }
-        Some(Cmd::Clear) => {
-            let items = warehouse::list()?;
-            for item in &items {
-                item.remove()?;
-            }
-            eprintln!("cleared {} item(s)", items.len());
-            Ok(ExitCode::SUCCESS)
-        }
-        None if io::stdout().is_terminal() => receive(),
-        None => pop(false),
+        eprintln!("cleared {} item(s)", items.len());
+        Ok(ExitCode::SUCCESS)
+    } else if cli.pop || cli.keep || !io::stdout().is_terminal() {
+        pop(cli.keep)
+    } else {
+        receive()
     }
 }
 

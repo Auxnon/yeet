@@ -53,14 +53,18 @@ pub struct SendOpts {
 
 pub fn run(opts: SendOpts) -> Result<()> {
     let mut text = opts.text.clone();
-    if text.is_none() && opts.paths.is_empty() {
+    // `-t` with no value (or `-t -`) means read the text from stdin.
+    if text.as_deref() == Some("-") {
         let mut stdin = std::io::stdin();
         if stdin.is_terminal() {
-            bail!("nothing to send: pass files, --text, or pipe text on stdin");
+            bail!("-t with no text reads stdin, but stdin is a terminal");
         }
         let mut buf = String::new();
         stdin.read_to_string(&mut buf).context("reading stdin")?;
         text = Some(buf);
+    }
+    if text.as_deref() == Some("") {
+        bail!("refusing to send empty text");
     }
 
     let batch = warehouse::new_id();

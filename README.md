@@ -4,9 +4,9 @@ Throw files and text at another machine on your LAN, then pick them up from a TU
 
 ```sh
 # on your laptop
-yeet send --to desktop report.pdf photos/
-git diff | yeet send --to desktop
-yeet send --to desktop -t "the wifi password is hunter2"
+yeet --to desktop report.pdf photos/
+yeet --to desktop -t "the wifi password is hunter2"
+git diff | yeet --to desktop -t     # -t with no value reads stdin
 
 # on the desktop, in whatever folder you want things to land
 yeet
@@ -21,29 +21,33 @@ item to stdout and removes it from the warehouse:
 
 ```sh
 yeet | jq .          # most recent text/file, piped
-yeet pop --keep > x  # same, but leave it in the warehouse
+yeet -p -k > x       # same, but leave it in the warehouse
 ```
 
 ## How it works
 
 Every machine has a **warehouse** at `~/.yeet/warehouse` (override with
-`YEET_WAREHOUSE`). `yeet send` stages the items locally, uploads them over ssh
+`YEET_WAREHOUSE`). `yeet FILE...` stages the items locally, uploads them over ssh
 with **rsync** (or **scp**) into `<warehouse>/.incoming/`, then moves them into
 place in one step. The receiver never sees a half-copied item.
 
-There's no daemon and no open port, only ssh. If `ssh desktop` works, `yeet send --to desktop`
+There's no daemon and no open port, only ssh. If `ssh desktop` works, `yeet --to desktop`
 works. Set up key auth (`ssh-copy-id desktop`) so there's no password prompt.
 The receiving machine needs `yeet` itself to pick items up, and ideally `rsync`.
 
-## Commands
+## Usage
 
-| command | |
+| | |
 |---|---|
+| `yeet FILE...` | send files/folders |
+| `yeet -t "text"` | send raw text (`-t` alone reads stdin) |
 | `yeet` | TUI picker (or pop the newest item when piped) |
-| `yeet send [PATHS]... [-t TEXT] [--to HOST]` | send files/folders/text; reads stdin if no paths or text |
-| `yeet pop [--keep]` | write the newest item to stdout |
-| `yeet list` | list pending items |
-| `yeet clear` | delete all pending items |
+| `yeet -p` / `--pop` | write the newest item to stdout (`-k` to keep it) |
+| `yeet -l` / `--list` | list pending items |
+| `yeet --clear` | delete all pending items |
+
+Files and `-t` can be combined in one send. Set a default destination (see
+Config) and sending is just `yeet report.pdf`.
 
 `--to local` drops items into your own warehouse, which is handy for testing.
 
