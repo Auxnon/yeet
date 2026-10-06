@@ -1,9 +1,10 @@
 mod clipboard;
+mod net;
 mod send;
 mod tui;
 mod warehouse;
 
-use std::fs::File;
+use std::fs::{self, File};
 use std::io::{self, IsTerminal, Write};
 use std::path::PathBuf;
 use std::process::ExitCode;
@@ -31,7 +32,8 @@ struct Cli {
     #[arg(short, long, num_args = 0..=1, default_missing_value = "-")]
     text: Option<String>,
 
-    /// Destination: an ssh host (user@host or ~/.ssh/config alias), or `local`
+    /// Destination: an ssh host (user@host or ~/.ssh/config alias), or `local`.
+    /// Without it, a picker of saved destinations opens
     #[arg(long, env = "YEET_TO")]
     to: Option<String>,
 
@@ -73,21 +75,7 @@ fn main() -> ExitCode {
 fn run() -> Result<ExitCode> {
     let cli = Cli::parse();
     if !cli.paths.is_empty() || cli.text.is_some() {
-        let config = Config::load()?;
-        let to = cli.to.or(config.to).context(
-            "no destination: pass --to <host>, set YEET_TO, or set `to` in ~/.config/yeet/config.toml",
-        )?;
-        send::run(send::SendOpts {
-            paths: cli.paths,
-            text: cli.text,
-            to,
-            via: cli.via.or(config.via).unwrap_or(Via::Auto),
-            remote_dir: cli
-                .remote_dir
-                .or(config.remote_dir)
-                .unwrap_or_else(|| send::DEFAULT_REMOTE_DIR.into()),
-        })?;
-        return Ok(ExitCode::SUCCESS);
+        return send(cli).map(|()| ExitCode::SUCCESS);
     }
 
     if cli.list {
@@ -113,6 +101,64 @@ fn run() -> Result<ExitCode> {
     } else {
         receive()
     }
+}
+
+fn send(cli: Cli) -> Result<()> {
+    // Resolve everything that can fail before asking where to send it.
+    let text = send::resolve_text(cli.text)?;
+    for path in &cli.paths {
+        if fs::symlink_metadata(path).is_err() {
+            bail!("{} not found", path.display());
+        }
+    }
+
+    let mut config = Config::load()?;
+    let to = match cli.to {
+        Some(to) => to,
+        None => {
+            if !io::stdout().is_terminal() {
+                bail!(
+                    "no destination: pass --to <host> or set YEET_TO (the picker needs a terminal)"
+                );
+            }
+            let local = net::detect();
+            let pick = tui::pick_destination(
+                config.destinations.clone(),
+                &send::summary(&cli.paths, text.as_deref()),
+                &local
+                    .as_ref()
+                    .map(net::LocalNet::prefill)
+                    .unwrap_or_default(),
+                local.as_ref().map(ToString::to_string).as_deref(),
+            )?;
+            if pick.destinations != config.destinations {
+                config.destinations = pick.destinations;
+                config.save()?;
+            }
+            match pick.chosen {
+                Some(to) => to,
+                None => return Ok(()),
+            }
+        }
+    };
+
+    send::run(send::SendOpts {
+        paths: cli.paths,
+        text,
+        to: to.clone(),
+        via: cli.via.or(config.via).unwrap_or(Via::Auto),
+        remote_dir: cli
+            .remote_dir
+            .or(config.remote_dir.clone())
+            .unwrap_or_else(|| send::DEFAULT_REMOTE_DIR.into()),
+    })?;
+
+    // Only remember destinations that actually worked, so typos don't pile up.
+    if to != "local" {
+        config.remember(&to);
+        config.save()?;
+    }
+    Ok(())
 }
 
 fn receive() -> Result<ExitCode> {

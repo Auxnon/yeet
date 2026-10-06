@@ -7,13 +7,13 @@ use std::process::Command;
 
 use anyhow::{Context, Result, bail};
 use clap::ValueEnum;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 
 use crate::warehouse::{self, Kind, Meta};
 
 pub const DEFAULT_REMOTE_DIR: &str = ".yeet/warehouse";
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum Via {
     /// rsync if installed, falling back to scp
@@ -23,23 +23,46 @@ pub enum Via {
 }
 
 /// `~/.config/yeet/config.toml`
-#[derive(Debug, Default, Deserialize)]
+#[derive(Debug, Default, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Config {
-    pub to: Option<String>,
+    /// Saved destinations, most recently used first.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub destinations: Vec<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub via: Option<Via>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub remote_dir: Option<String>,
 }
 
 impl Config {
+    fn path() -> Option<PathBuf> {
+        dirs::config_dir().map(|d| d.join("yeet").join("config.toml"))
+    }
+
     pub fn load() -> Result<Self> {
-        let Some(path) = dirs::config_dir().map(|d| d.join("yeet").join("config.toml")) else {
+        let Some(path) = Self::path() else {
             return Ok(Self::default());
         };
         match fs::read_to_string(&path) {
             Ok(s) => toml::from_str(&s).with_context(|| format!("parsing {}", path.display())),
             Err(_) => Ok(Self::default()),
         }
+    }
+
+    pub fn save(&self) -> Result<()> {
+        let path = Self::path().context("cannot determine config directory")?;
+        if let Some(dir) = path.parent() {
+            fs::create_dir_all(dir)?;
+        }
+        fs::write(&path, toml::to_string_pretty(self)?)
+            .with_context(|| format!("writing {}", path.display()))
+    }
+
+    /// Move `dest` to the front of the saved destinations.
+    pub fn remember(&mut self, dest: &str) {
+        self.destinations.retain(|d| d != dest);
+        self.destinations.insert(0, dest.to_string());
     }
 }
 
@@ -51,22 +74,44 @@ pub struct SendOpts {
     pub remote_dir: String,
 }
 
-pub fn run(opts: SendOpts) -> Result<()> {
-    let mut text = opts.text.clone();
-    // `-t` with no value (or `-t -`) means read the text from stdin.
-    if text.as_deref() == Some("-") {
-        let mut stdin = std::io::stdin();
-        if stdin.is_terminal() {
-            bail!("-t with no text reads stdin, but stdin is a terminal");
+/// Resolve `-t`: no value (or `-`) means read the text from stdin.
+pub fn resolve_text(text: Option<String>) -> Result<Option<String>> {
+    let text = match text.as_deref() {
+        Some("-") => {
+            let mut stdin = std::io::stdin();
+            if stdin.is_terminal() {
+                bail!("-t with no text reads stdin, but stdin is a terminal");
+            }
+            let mut buf = String::new();
+            stdin.read_to_string(&mut buf).context("reading stdin")?;
+            Some(buf)
         }
-        let mut buf = String::new();
-        stdin.read_to_string(&mut buf).context("reading stdin")?;
-        text = Some(buf);
-    }
+        _ => text,
+    };
     if text.as_deref() == Some("") {
         bail!("refusing to send empty text");
     }
+    Ok(text)
+}
 
+/// Short description of what's being sent, e.g. `a.txt, photos, text (12 B)`.
+pub fn summary(paths: &[PathBuf], text: Option<&str>) -> String {
+    let mut parts: Vec<String> = paths
+        .iter()
+        .map(|p| {
+            p.file_name()
+                .map(|n| n.to_string_lossy().into_owned())
+                .unwrap_or_else(|| p.display().to_string())
+        })
+        .collect();
+    if let Some(t) = text {
+        parts.push(format!("text ({})", warehouse::human_size(t.len() as u64)));
+    }
+    parts.join(", ")
+}
+
+pub fn run(opts: SendOpts) -> Result<()> {
+    let text = opts.text.clone();
     let batch = warehouse::new_id();
     let stage = warehouse::yeet_home()?.join("outbox").join(&batch);
     fs::create_dir_all(&stage)?;

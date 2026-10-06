@@ -3,10 +3,10 @@
 Throw files and text at another machine on your LAN, then pick them up from a TUI.
 
 ```sh
-# on your laptop
-yeet --to desktop report.pdf photos/
-yeet --to desktop -t "the wifi password is hunter2"
-git diff | yeet --to desktop -t     # -t with no value reads stdin
+# on your laptop: pick a destination, send
+yeet report.pdf photos/
+yeet -t "the wifi password is hunter2"
+git diff | yeet -t                  # -t with no value reads stdin
 
 # on the desktop, in whatever folder you want things to land
 yeet
@@ -23,6 +23,22 @@ item to stdout and removes it from the warehouse:
 yeet | jq .          # most recent text/file, piped
 yeet -p -k > x       # same, but leave it in the warehouse
 ```
+
+## Destinations
+
+Sending opens a picker of your saved destinations. The last row is
+**+ new destination**. The first time, when nothing is saved yet, the
+new-destination input opens straight away, already filled in with your LAN
+prefix. On a `192.168.1.0/24` network you'll see `192.168.1.` and only need
+to type the last number. yeet finds the prefix from the interface on your
+default route and its netmask, and ignores Docker/VM bridges and VPN
+tunnels.
+
+A destination is anything `ssh` accepts: `192.168.1.20`, `me@192.168.1.20`,
+or a `~/.ssh/config` alias. It's saved only after a send to it succeeds, so
+typos don't pile up, and the most recently used destination comes first. Press
+`x` in the picker to forget one. Use `--to HOST` (or `YEET_TO`) to skip the
+picker, e.g. in scripts.
 
 ## How it works
 
@@ -46,8 +62,7 @@ The receiving machine needs `yeet` itself to pick items up, and ideally `rsync`.
 | `yeet -l` / `--list` | list pending items |
 | `yeet --clear` | delete all pending items |
 
-Files and `-t` can be combined in one send. Set a default destination (see
-Config) and sending is just `yeet report.pdf`.
+Files and `-t` can be combined in one send.
 
 `--to local` drops items into your own warehouse, which is handy for testing.
 
@@ -58,10 +73,11 @@ highlighted item if nothing is marked) · `esc`/`q` cancel without taking anythi
 
 ## Config
 
-`~/.config/yeet/config.toml` (all optional):
+`~/.config/yeet/config.toml` (all optional; yeet rewrites this file when it
+saves destinations, so comments in it are not kept):
 
 ```toml
-to = "desktop"                  # default --to (or set YEET_TO)
+destinations = ["desktop", "192.168.1.20"]  # managed by the picker
 via = "auto"                    # auto | rsync | scp
 remote_dir = ".yeet/warehouse"  # relative to the remote home
 ```
