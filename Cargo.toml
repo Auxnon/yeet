@@ -1,0 +1,21 @@
+[package]
+name = "yeet"
+version = "0.1.0"
+edition = "2024"
+description = "Send files and text to other machines on your LAN, pick them up from a TUI"
+repository = "https://github.com/Auxnon/yeet"
+
+[dependencies]
+anyhow = "1.0.104"
+clap = { version = "4.6.7", features = ["derive", "env"] }
+crossterm = "0.29.0"
+dirs = "7.0.0"
+gethostname = "1.1.0"
+ratatui = "0.30.2"
+ratatui-cheese = "0.7.0"
+serde = { version = "1.0.229", features = ["derive"] }
+serde_json = "1.0.151"
+toml = "1.1.6"
+
+[target.'cfg(not(target_os = "linux"))'.dependencies]
+arboard = "3.6.1"
