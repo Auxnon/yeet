@@ -86,14 +86,14 @@ highlighted item if nothing is marked) · `esc`/`q` cancel without taking anythi
 saves destinations, so comments in it are not kept):
 
 ```toml
+via = "auto"                    # auto | rsync | scp
+remote_dir = ".yeet/warehouse"  # relative to the remote home
+
 # destinations are managed by the picker
 [[destinations]]
 host = "192.168.1.20"
 user = "me"        # optional
 name = "desktop"   # optional
-
-via = "auto"                    # auto | rsync | scp
-remote_dir = ".yeet/warehouse"  # relative to the remote home
 ```
 
 ## Clipboard
